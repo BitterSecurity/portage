@@ -38,7 +38,7 @@ impl ClaudeCode {
 }
 
 /// Encode a cwd into Claude Code's project directory name.
-/// Unix: `/home/catow/GIT/portage` -> `-home-catow-GIT-portage`.
+/// Unix: `/home/you/project` -> `-home-you-project`.
 /// Windows: `C:\Users\x` -> `C--Users-x` (drive colon also becomes `-`).
 /// The Unix/WSL form is verified against real stores; the native-Windows form
 /// is a best guess — confirm with `portage inspect` on Windows.

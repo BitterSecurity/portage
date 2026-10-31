@@ -1,8 +1,7 @@
 # portage — universal agent-session converter
 
-**Status:** design (pending approval)
+**Status:** design
 **Date:** 2026-10-31
-**Owner:** catower917@gmail.com
 
 ---
 
