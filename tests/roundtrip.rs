@@ -105,6 +105,48 @@ fn convert_codex_to_claude_code() {
     assert_eq!(kinds.get("result"), Some(&1));
 }
 
+fn roundtrip_preserves_blocks(harness: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let a = adapters::by_name_with_root(harness, Some(dir.path().to_path_buf())).unwrap();
+    let opts = WriteOpts { handshake: false, cwd_override: Some("/home/u/proj".into()), force: false };
+    let out = a.write(&sample(), &opts).unwrap();
+    let back = a.read(&out.artifacts[0].to_string_lossy()).unwrap();
+    assert_eq!(block_kinds(&back), block_kinds(&sample()), "{harness} must preserve blocks");
+}
+
+#[test]
+fn qwen_roundtrip_preserves_blocks() {
+    roundtrip_preserves_blocks("qwen");
+}
+
+#[test]
+fn kimi_roundtrip_preserves_blocks() {
+    roundtrip_preserves_blocks("kimi");
+}
+
+#[test]
+fn convert_codex_to_qwen_and_kimi() {
+    for target in ["qwen", "kimi"] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let codex = adapters::by_name_with_root("codex", Some(root.clone())).unwrap();
+        let seeded = codex.write(&sample(), &WriteOpts::default()).unwrap();
+
+        let src = adapters::by_name_with_root("codex", Some(root.clone())).unwrap();
+        let dst = adapters::by_name_with_root(target, Some(root.clone())).unwrap();
+        let opts = WriteOpts { handshake: true, cwd_override: Some("/home/u/proj".into()), force: false };
+        let (outcome, _) =
+            convert::run(src.as_ref(), dst.as_ref(), &seeded.artifacts[0].to_string_lossy(), &opts)
+                .unwrap();
+        assert!(outcome.artifacts[0].exists());
+        let back = dst.read(&outcome.artifacts[0].to_string_lossy()).unwrap();
+        // original 5 blocks + 1 preamble text block.
+        assert_eq!(block_kinds(&back).get("text"), Some(&3), "{target}");
+        assert_eq!(block_kinds(&back).get("call"), Some(&1), "{target}");
+        assert_eq!(block_kinds(&back).get("result"), Some(&1), "{target}");
+    }
+}
+
 #[test]
 fn codex_index_registration_inserts_row() {
     let dir = tempfile::tempdir().unwrap();

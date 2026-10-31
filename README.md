@@ -25,10 +25,12 @@ Early. Fully implemented and tested today:
 |--------------|:------:|:------:|
 | Claude Code  | ✅ | ✅ |
 | Codex CLI    | ✅ | ✅ |
+| Qwen Code    | ✅ | ✅ |
+| Kimi Code    | ✅ | ✅ |
 | Copilot CLI  | ✅ | — (read-only for now) |
 
-More harnesses (Gemini/Antigravity, opencode, Goose, Qwen, Kimi, Hermes,
-OpenClaw) are specified in `docs/superpowers/specs/` and plug in as
+More harnesses (Gemini/Antigravity, opencode, Goose, Hermes, OpenClaw —
+the SQLite-backed ones) are specified in `docs/superpowers/specs/` and plug in as
 `reader`/`writer`/`registrar` adapters. **On-disk formats are vendor-private and
 reverse-engineered** — a converted session is verified by round-trip against
 synthetic fixtures; always confirm a real resume against your installed version.
