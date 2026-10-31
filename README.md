@@ -66,6 +66,22 @@ portage convert <path> --from codex --to claude-code --cwd "$PWD"
 `--cwd` matters for Claude Code: resume only finds the session when the
 encoded-cwd directory matches where you launch `claude`.
 
+### Modes
+
+- `--mode handoff` (default): a compact, action-preserving briefing (task,
+  files touched, commands run, tool activity) + the recent exchange, then asks
+  the target to self-orient. Reasoning and stale tool output are dropped;
+  secrets are redacted. Best for *continuing work* in another tool.
+- `--mode replay`: faithful 1:1 of every message, for archival/debugging.
+
+### Platforms
+
+Home-relative stores (Codex, Claude Code, Qwen, Kimi) resolve the same on
+Linux, WSL, macOS, and Windows via the OS home dir. opencode's store uses the
+OS data dir (`~/.local/share`, `~/Library/Application Support`, or `%APPDATA%`);
+set `PORTAGE_OPENCODE_DB` to override. Verified on WSL/Linux; macOS and
+native-Windows paths are resolved per-OS but not yet confirmed on-platform.
+
 ### From inside an agent (MCP)
 
 ```sh

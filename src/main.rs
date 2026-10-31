@@ -36,10 +36,16 @@ enum Cmd {
         from: String,
         #[arg(long)]
         to: String,
+        /// handoff = compact briefing + recent tail (default); replay = full 1:1.
+        #[arg(long, default_value = "handoff")]
+        mode: String,
+        /// Recent messages kept verbatim in handoff mode.
+        #[arg(long, default_value_t = 8)]
+        tail: usize,
         /// Override the cwd the session is registered under (Claude Code needs it).
         #[arg(long)]
         cwd: Option<String>,
-        /// Do not inject the resume preamble.
+        /// Replay mode only: do not inject the resume preamble.
         #[arg(long)]
         no_handshake: bool,
         /// Write even if the target store schema is unrecognized.
@@ -56,10 +62,19 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::List { from } => list(from),
         Cmd::Inspect { session, from } => inspect(&from, &session),
-        Cmd::Convert { session, from, to, cwd, no_handshake, force } => {
+        Cmd::Convert { session, from, to, mode, tail, cwd, no_handshake, force } => {
             let src = adapters::by_name(&from)?;
             let dst = adapters::by_name(&to)?;
-            let opts = WriteOpts { handshake: !no_handshake, cwd_override: cwd, force };
+            let mode = match mode.as_str() {
+                "handoff" => convert::Mode::Handoff,
+                "replay" => convert::Mode::Replay,
+                other => anyhow::bail!("unknown --mode '{other}' (use handoff or replay)"),
+            };
+            let opts = convert::ConvertOpts {
+                mode,
+                tail,
+                write: WriteOpts { handshake: !no_handshake, cwd_override: cwd, force },
+            };
             let (outcome, report) = convert::run(src.as_ref(), dst.as_ref(), &session, &opts)?;
             for n in &report.notes {
                 eprintln!("• {n}");

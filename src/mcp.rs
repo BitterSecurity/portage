@@ -5,7 +5,7 @@
 //! protocol implementation.
 
 use crate::adapters;
-use crate::convert;
+use crate::convert::{self, ConvertOpts, Mode};
 use crate::harness::WriteOpts;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -81,7 +81,8 @@ fn tool_defs() -> Value {
                     "from": { "type": "string" },
                     "to": { "type": "string" },
                     "session": { "type": "string" },
-                    "cwd": { "type": "string" }
+                    "cwd": { "type": "string" },
+                    "mode": { "type": "string", "enum": ["handoff", "replay"], "description": "handoff (default) = compact briefing + recent tail; replay = full 1:1" }
                 }
             }
         }
@@ -120,7 +121,15 @@ fn call_inner(params: Option<&Value>) -> Result<String> {
             let session = get("session").ok_or_else(|| anyhow::anyhow!("'session' required"))?;
             let src = adapters::by_name(&from)?;
             let dst = adapters::by_name(&to)?;
-            let opts = WriteOpts { handshake: true, cwd_override: get("cwd"), force: false };
+            let mode = match get("mode").as_deref() {
+                Some("replay") => Mode::Replay,
+                _ => Mode::Handoff,
+            };
+            let opts = ConvertOpts {
+                mode,
+                tail: 8,
+                write: WriteOpts { handshake: true, cwd_override: get("cwd"), force: false },
+            };
             let (outcome, report) = convert::run(src.as_ref(), dst.as_ref(), &session, &opts)?;
             Ok(format!("{}\nresume: {}", report.notes.join("; "), outcome.resume_hint))
         }

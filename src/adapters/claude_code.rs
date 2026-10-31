@@ -31,9 +31,13 @@ impl ClaudeCode {
     }
 }
 
-/// `/home/catow/GIT/portage` -> `-home-catow-GIT-portage`
+/// Encode a cwd into Claude Code's project directory name.
+/// Unix: `/home/catow/GIT/portage` -> `-home-catow-GIT-portage`.
+/// Windows: `C:\Users\x` -> `C--Users-x` (drive colon also becomes `-`).
+/// The Unix/WSL form is verified against real stores; the native-Windows form
+/// is a best guess — confirm with `portage inspect` on Windows.
 pub fn encode_cwd(cwd: &str) -> String {
-    cwd.replace(['/', '\\'], "-")
+    cwd.replace(['/', '\\', ':'], "-")
 }
 
 fn content_to_blocks(content: &Value) -> Vec<Block> {

@@ -158,6 +158,46 @@ Classification: **S** = usable as source (read), **T** = usable as target
 - `portage mcp` — run the MCP server exposing convert/list/inspect as tools.
 - `portage install-skill` — install the portage skill into detected harnesses.
 
+## 6b. Handoff vs replay (context transfer)
+
+Faithfully replaying every message into the target is wrong for *continuing
+work* across harnesses: it is bulky, carries stale tool outputs as if current,
+and injects another model's reasoning. Research (Anthropic context engineering;
+CoACT action-preserving compression; "The Complexity Trap" on observation
+masking; CliffCompaction on summary degradation; InfiAgent on durable file
+state) converges on a compact, action-preserving handoff instead.
+
+Key insight for portage: **the target is a coding agent on the same filesystem,
+so the code files ARE the durable state.** We carry the narrative/decision
+context and tool *actions*, never stale file *contents* — the target re-reads
+files from disk.
+
+Two modes (`--mode`, default `handoff`):
+- **handoff**: a deterministic briefing message (Original task / Files touched
+  (paths only) / Commands run (✓✗) / Tool activity / "your job: self-orient")
+  followed by the last K messages as **text only** (no tool_call/result blocks,
+  so no orphaned pairs break resume). Reasoning dropped. Secrets redacted. One
+  pass, no re-summarization. LLM summary is a future opt-in (`--summarize`).
+- **replay**: faithful 1:1 (archival / debugging), optional resume preamble.
+
+Extraction is heuristic and deployment-specific (tool names vary: this user's
+Codex uses `exec` as a bare-string command tool, `send_message`, etc.). The
+safety net: *all* tool calls are listed in "Tool activity" so nothing is
+hidden, and the target self-orients from the recent tail + the live files.
+
+## 6c. OS / platform matrix
+
+| concern | handling |
+|---|---|
+| home dir | `dirs::home_dir()` — `%USERPROFILE%` (Win), `$HOME` (Unix) |
+| home dotdir stores (Codex `~/.codex`, Claude `~/.claude`, Qwen `~/.qwen`, Kimi `~/.kimi-code`) | identical across OSes ✓ |
+| OS data-dir stores (opencode) | `dirs::data_dir()`: Linux/WSL `~/.local/share`, macOS `~/Library/Application Support`, Windows `%APPDATA%`. Override: `PORTAGE_OPENCODE_DB` |
+| Claude Code encoded-cwd | `/`,`\`,`:` → `-`. Unix/WSL verified on real stores; native-Windows scheme (drive letters) is a best guess, unverified |
+
+Verified here on **WSL/Linux** (real stores present). macOS and native-Windows
+paths follow the per-OS data dir but are not yet verified on those platforms;
+the env override is the escape hatch until they are.
+
 ## 7. Constraints
 - Session files may contain secrets → test fixtures are synthetic; never ship
   real transcripts in the repo.

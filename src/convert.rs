@@ -2,6 +2,7 @@
 //! Asymmetries that cannot cross losslessly are collected in a
 //! `ConversionReport`, never silently dropped.
 
+use crate::digest;
 use crate::harness::{Adapter, WriteOpts, WriteOutcome};
 use crate::ir::{Block, Message, Role, Session};
 use anyhow::{bail, Result};
@@ -11,12 +12,35 @@ pub struct ConversionReport {
     pub notes: Vec<String>,
 }
 
+/// How much of the source session to carry over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Compact, action-preserving briefing + recent text tail (default for
+    /// continuing work in another harness).
+    Handoff,
+    /// Faithful 1:1 replay of every message (archival / debugging).
+    Replay,
+}
+
+pub struct ConvertOpts {
+    pub mode: Mode,
+    /// Recent messages kept verbatim in handoff mode.
+    pub tail: usize,
+    pub write: WriteOpts,
+}
+
+impl Default for ConvertOpts {
+    fn default() -> Self {
+        ConvertOpts { mode: Mode::Handoff, tail: 8, write: WriteOpts::default() }
+    }
+}
+
 /// Run a conversion between two already-constructed adapters.
 pub fn run(
     source: &dyn Adapter,
     target: &dyn Adapter,
     locator: &str,
-    opts: &WriteOpts,
+    opts: &ConvertOpts,
 ) -> Result<(WriteOutcome, ConversionReport)> {
     if !source.can_read() {
         bail!("{} cannot be used as a source", source.name());
@@ -25,29 +49,37 @@ pub fn run(
         bail!("{} cannot be used as a target (resume not supported here)", target.name());
     }
 
-    let mut session = source.read(locator)?;
+    let raw = source.read(locator)?;
     let mut report = ConversionReport::default();
 
-    report.notes.push(format!(
-        "mapped {} -> {} ({} messages)",
-        source.name(),
-        target.name(),
-        session.messages.len()
-    ));
-    if session.messages.iter().any(|m| {
-        m.blocks.iter().any(|b| matches!(b, Block::Reasoning { .. }))
-    }) {
-        report.notes.push(
-            "reasoning preserved as summary text only (signatures/opaque payloads dropped)".into(),
-        );
-    }
+    let session = match opts.mode {
+        Mode::Handoff => {
+            let s = digest::build_handoff_session(&raw, source.name(), target.name(), opts.tail);
+            report.notes.push(format!(
+                "handoff: {} source messages → briefing + last {} text turns (reasoning & stale tool output dropped)",
+                raw.messages.len(),
+                s.messages.len().saturating_sub(1)
+            ));
+            s
+        }
+        Mode::Replay => {
+            let mut s = raw;
+            report.notes.push(format!("replay: {} messages 1:1", s.messages.len()));
+            if s.messages.iter().any(|m| m.blocks.iter().any(|b| matches!(b, Block::Reasoning { .. }))) {
+                report.notes.push(
+                    "reasoning kept as summary text only (signatures/opaque payloads dropped)".into(),
+                );
+            }
+            if opts.write.handshake {
+                let p = preamble(&s, source.name());
+                s.messages.insert(0, p);
+                report.notes.push("injected resume preamble".into());
+            }
+            s
+        }
+    };
 
-    if opts.handshake {
-        session.messages.insert(0, preamble(&session, source.name()));
-        report.notes.push("injected resume preamble as first message".into());
-    }
-
-    let outcome = target.write(&session, opts)?;
+    let outcome = target.write(&session, &opts.write)?;
     Ok((outcome, report))
 }
 

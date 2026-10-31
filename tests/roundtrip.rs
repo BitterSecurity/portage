@@ -4,9 +4,17 @@
 //! install — that bar requires the actual harness (see design §3).
 
 use portage::adapters;
-use portage::convert;
+use portage::convert::{self, ConvertOpts, Mode};
 use portage::harness::WriteOpts;
 use portage::ir::{Block, Message, Role, Session};
+
+fn replay(cwd: &str) -> ConvertOpts {
+    ConvertOpts {
+        mode: Mode::Replay,
+        tail: 8,
+        write: WriteOpts { handshake: true, cwd_override: Some(cwd.into()), force: false },
+    }
+}
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -88,9 +96,13 @@ fn convert_codex_to_claude_code() {
     // Convert Codex -> Claude Code.
     let src = adapters::by_name_with_root("codex", Some(root.clone())).unwrap();
     let dst = adapters::by_name_with_root("claude-code", Some(root.clone())).unwrap();
-    let opts = WriteOpts { handshake: true, cwd_override: Some("/home/u/proj".into()), force: false };
-    let (outcome, report) =
-        convert::run(src.as_ref(), dst.as_ref(), &seeded.artifacts[0].to_string_lossy(), &opts).unwrap();
+    let (outcome, report) = convert::run(
+        src.as_ref(),
+        dst.as_ref(),
+        &seeded.artifacts[0].to_string_lossy(),
+        &replay("/home/u/proj"),
+    )
+    .unwrap();
 
     assert!(outcome.artifacts[0].exists());
     assert!(report.notes.iter().any(|n| n.contains("preamble")));
@@ -134,10 +146,13 @@ fn convert_codex_to_qwen_and_kimi() {
 
         let src = adapters::by_name_with_root("codex", Some(root.clone())).unwrap();
         let dst = adapters::by_name_with_root(target, Some(root.clone())).unwrap();
-        let opts = WriteOpts { handshake: true, cwd_override: Some("/home/u/proj".into()), force: false };
-        let (outcome, _) =
-            convert::run(src.as_ref(), dst.as_ref(), &seeded.artifacts[0].to_string_lossy(), &opts)
-                .unwrap();
+        let (outcome, _) = convert::run(
+            src.as_ref(),
+            dst.as_ref(),
+            &seeded.artifacts[0].to_string_lossy(),
+            &replay("/home/u/proj"),
+        )
+        .unwrap();
         assert!(outcome.artifacts[0].exists());
         let back = dst.read(&outcome.artifacts[0].to_string_lossy()).unwrap();
         // original 5 blocks + 1 preamble text block.
@@ -145,6 +160,47 @@ fn convert_codex_to_qwen_and_kimi() {
         assert_eq!(block_kinds(&back).get("call"), Some(&1), "{target}");
         assert_eq!(block_kinds(&back).get("result"), Some(&1), "{target}");
     }
+}
+
+#[test]
+fn handoff_mode_compresses_and_drops_reasoning() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let codex = adapters::by_name_with_root("codex", Some(root.clone())).unwrap();
+    let seeded = codex.write(&sample(), &WriteOpts::default()).unwrap();
+
+    let src = adapters::by_name_with_root("codex", Some(root.clone())).unwrap();
+    let dst = adapters::by_name_with_root("claude-code", Some(root.clone())).unwrap();
+    let opts = ConvertOpts {
+        mode: Mode::Handoff,
+        tail: 8,
+        write: WriteOpts { handshake: false, cwd_override: Some("/home/u/proj".into()), force: false },
+    };
+    let (outcome, report) =
+        convert::run(src.as_ref(), dst.as_ref(), &seeded.artifacts[0].to_string_lossy(), &opts).unwrap();
+    assert!(report.notes.iter().any(|n| n.contains("handoff")));
+
+    let cc = adapters::by_name_with_root("claude-code", Some(root)).unwrap();
+    let back = cc.read(&outcome.artifacts[0].to_string_lossy()).unwrap();
+
+    // First message is the briefing.
+    let brief = Session::text_of(&back.messages[0]);
+    assert!(brief.contains("Session handoff"));
+    assert!(brief.contains("Files touched"));
+    assert!(brief.contains("a.txt"), "file path from tool call should appear: {brief}");
+    // Reasoning never survives a handoff.
+    assert_eq!(block_kinds(&back).get("reasoning"), None);
+    // Compact: fewer messages than the raw 5-item codex replay.
+    assert!(back.messages.len() <= 4);
+}
+
+#[test]
+fn redact_masks_secrets() {
+    let r = portage::digest::redact("token sk-ABCD1234efgh5678IJKL90mnop here");
+    assert!(r.contains("[redacted]"), "got: {r}");
+    assert!(r.contains("token") && r.contains("here"));
+    // ordinary words are untouched
+    assert_eq!(portage::digest::redact("just normal words"), "just normal words");
 }
 
 #[test]

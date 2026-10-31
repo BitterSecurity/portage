@@ -3,6 +3,7 @@
 
 pub mod adapters;
 pub mod convert;
+pub mod digest;
 pub mod harness;
 pub mod ir;
 pub mod mcp;

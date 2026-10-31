@@ -20,15 +20,28 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 pub struct OpenCode {
-    root: PathBuf,
+    /// Test/explicit home override; None => per-OS data dir.
+    root: Option<PathBuf>,
 }
 
 impl OpenCode {
     pub fn new_opt(root: Option<PathBuf>) -> Self {
-        OpenCode { root: root.unwrap_or_else(|| dirs::home_dir().unwrap_or_default()) }
+        OpenCode { root }
     }
+    /// opencode stores its DB in the OS data dir, which differs per platform:
+    /// Linux/WSL `~/.local/share`, macOS `~/Library/Application Support`,
+    /// Windows `%APPDATA%`. `dirs::data_dir()` resolves the right one.
+    /// `PORTAGE_OPENCODE_DB` overrides the full path for nonstandard installs.
     fn db_path(&self) -> PathBuf {
-        self.root.join(".local").join("share").join("opencode").join("opencode.db")
+        if let Ok(p) = std::env::var("PORTAGE_OPENCODE_DB") {
+            return PathBuf::from(p);
+        }
+        let base = match &self.root {
+            Some(r) => r.join(".local").join("share"),
+            None => dirs::data_dir()
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".local").join("share")),
+        };
+        base.join("opencode").join("opencode.db")
     }
     fn open(&self) -> Result<Connection> {
         let p = self.db_path();
