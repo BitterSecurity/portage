@@ -1,0 +1,31 @@
+[package]
+name = "portage"
+version = "0.1.0"
+edition = "2021"
+description = "Carry an AI coding-agent session from one harness to another and resume it natively."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/catower/portage"
+readme = "README.md"
+keywords = ["cli", "ai", "agent", "session", "claude"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "portage"
+path = "src/main.rs"
+
+[lib]
+name = "portage"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.95"
+clap = { version = "4.5.23", features = ["derive"] }
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.134"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+uuid = { version = "1.11.0", features = ["v4"] }
+dirs = "5.0.1"
+time = { version = "0.3.37", features = ["formatting", "macros"] }
+
+[dev-dependencies]
+tempfile = "3.14.0"

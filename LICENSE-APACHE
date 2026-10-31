@@ -1,0 +1,9 @@
+This project is dual-licensed under MIT OR Apache-2.0.
+
+The canonical Apache License 2.0 text is not vendored here yet. Before the
+first public release, drop in the official text from:
+
+    https://www.apache.org/licenses/LICENSE-2.0.txt
+
+(ponytail: pointer now, full text at release — avoids shipping an inaccurate
+license reproduced from memory.)
