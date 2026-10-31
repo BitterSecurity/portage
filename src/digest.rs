@@ -59,6 +59,32 @@ pub fn build_handoff_session(session: &Session, source: &str, target: &str, tail
     out
 }
 
+/// One-line summary for session discovery: the task + files touched + the
+/// busiest tools. Lets a human or the calling agent judge a vague description
+/// against a candidate without opening it.
+pub fn quick_summary(session: &Session) -> String {
+    let goal = extract_goal(session)
+        .map(|g| g.lines().next().unwrap_or("").chars().take(90).collect::<String>())
+        .filter(|g| !g.trim().is_empty())
+        .unwrap_or_else(|| "(no explicit prompt)".into());
+    let (files, _cmds, activity) = extract_actions(session);
+    let mut parts = vec![goal];
+    if !files.is_empty() {
+        let names: Vec<String> = files
+            .iter()
+            .take(5)
+            .map(|(p, _)| p.rsplit(['/', '\\']).next().unwrap_or(p).to_string())
+            .collect();
+        parts.push(format!("files: {}", names.join(", ")));
+    }
+    if !activity.is_empty() {
+        let tools: Vec<String> =
+            activity.iter().take(3).map(|(n, c)| format!("{n}×{c}")).collect();
+        parts.push(format!("tools: {}", tools.join(", ")));
+    }
+    parts.join(" · ")
+}
+
 fn build_brief(session: &Session, source: &str, target: &str) -> String {
     let goal = extract_goal(session)
         .unwrap_or_else(|| "(no substantive user prompt found — see recent exchange)".into());

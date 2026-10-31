@@ -1,30 +1,46 @@
 ---
 name: portage
-description: Use when the user wants to continue/resume an AI coding-agent session from one harness in another — e.g. "import my last Codex session into Claude Code", "move this session to codex", "carry my session over". Converts and registers the session so the target's native --resume lists it.
+description: Use when the user wants to continue/resume work from a DIFFERENT coding agent's session in the current one — e.g. "continue my Codex session about the login page and password encryption", "pick up that opencode session from yesterday", "resume my most recent codex work here". Finds the session in the other harness (even from a vague description) and converts it so the current tool can resume it.
 ---
 
 # portage
 
-`portage` moves a coding-agent session between harnesses and makes it resumable
-in the target. Supported today: Claude Code and Codex (both directions),
-Copilot CLI (read-only source).
+`portage` carries a coding-agent session from another harness into the current
+one and makes it resumable here. It is a single binary (`portage`); this skill
+is a thin wrapper over it.
 
-## Steps
+Supported sources/targets: Claude Code, Codex, Qwen, Kimi (read+write);
+opencode, Copilot (read-only source).
 
-1. **Find the source session** if the user did not give a path:
-   `portage list --from <harness>`
-2. **Convert** into the target:
-   `portage convert <path> --from <src> --to <dst> --cwd "$PWD"`
-   - `--cwd` is required for `--to claude-code` and should be the directory the
-     user will launch `claude` from, or resume won't find it.
-   - Add `--no-handshake` to skip the injected resume-preamble message.
-3. **Report** the printed resume command to the user verbatim (e.g.
-   `cd <cwd> && claude --resume <id>`), plus any `•` notes about what did not
-   transfer.
+## Flow
+
+1. **Find the session the user means.** The user may describe it vaguely or from
+   memory. YOU do the semantic matching — do not expect exact keywords.
+   - Extract candidate keywords, including synonyms and both English and the
+     user's own language (e.g. login / auth / 암호화 / encryption / bcrypt).
+   - `portage find --from <source> "<keywords>"` — ranked candidates, each with
+     a one-line summary (task · files · tools). Run it more than once with
+     different keywords if unsure.
+   - `portage find --from <source> --latest` for "the most recent one".
+   - A keyword miss falls back to recent sessions to browse.
+   - Read the summaries and pick the best fit. If genuinely ambiguous, show the
+     user the top 2–3 summaries and ask which.
+
+2. **Convert into the current harness.**
+   `portage convert --from <source> --to <current> --match "<keywords>" --cwd "$PWD"`
+   (or `--session <path>` once you know it, or `--latest`).
+   - `--cwd` matters for Claude Code: use the directory the user will launch
+     `claude` from, or resume won't find it.
+   - Default `--mode handoff` carries a compact briefing + recent turns (best
+     for continuing work). `--mode replay` is a full 1:1 copy.
+
+3. **Report the printed resume command verbatim** (e.g.
+   `cd <cwd> && claude --resume <id>`), plus any `•` conversion notes. Never
+   invent a resume id.
 
 ## Notes
 
-- On-disk formats are reverse-engineered and version-specific. If `convert`
-  prints a note that the index/schema was not recognized, tell the user to
-  verify against their installed harness version before relying on resume.
-- Never fabricate a resume id; use exactly what `portage` printed.
+- Reasoning and stale tool output are dropped; the files are on disk, so the
+  resumed agent re-reads them. Secrets are redacted from the briefing.
+- On-disk formats are reverse-engineered. If `convert` warns the target schema
+  was unrecognized, tell the user to verify before relying on resume.

@@ -82,14 +82,39 @@ OS data dir (`~/.local/share`, `~/Library/Application Support`, or `%APPDATA%`);
 set `PORTAGE_OPENCODE_DB` to override. Verified on WSL/Linux; macOS and
 native-Windows paths are resolved per-OS but not yet confirmed on-platform.
 
-### From inside an agent (MCP)
+### Finding a session (even vaguely)
 
 ```sh
-portage mcp        # stdio MCP server exposing list / inspect / convert
+portage find --from codex "login page password encryption"   # ranked + summaries
+portage find --from codex --latest                            # most recent
 ```
 
-Point your harness's MCP config at `portage mcp`, then ask the agent to
-"import my last Codex session".
+`find` reads each candidate's content and prints a one-line summary (task ·
+files · tools). You don't need exact keywords — a miss falls back to recent
+sessions to browse. Then convert by description:
+
+```sh
+portage convert --from codex --to claude-code --match "login encryption" --cwd "$PWD"
+portage convert --from codex --to claude-code --latest --cwd "$PWD"
+```
+
+### Thin wrappers: MCP + skill
+
+Everything above is the CLI. Two wrappers make it one step from inside a harness:
+
+**MCP** — `portage mcp` is a stdio MCP server exposing `find`, `inspect`, and
+`convert`. Point your harness's MCP config at it:
+
+```json
+{ "mcpServers": { "portage": { "command": "portage", "args": ["mcp"] } } }
+```
+
+Then, from inside harness A, just say *"continue my Codex session about the
+login encryption work"* — the agent runs `find` (doing the fuzzy matching
+itself), picks the session, and `convert`s it.
+
+**Skill** — `skill/portage/SKILL.md` teaches an agent the find → convert flow.
+Copy it into your harness's skills directory (e.g. `~/.claude/skills/portage/`).
 
 ## What does not transfer
 

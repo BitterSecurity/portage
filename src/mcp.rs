@@ -62,13 +62,13 @@ fn tool_defs() -> Value {
         },
         {
             "name": "find",
-            "description": "Find sessions in a harness by description keywords and/or recency. Use this to locate the session the user described before converting it.",
+            "description": "Find sessions in a harness to continue. The user may describe one vaguely or from memory (e.g. 'the session where I did the login page and the password encryption'). YOU do the semantic matching: extract candidate keywords (include synonyms and both English and the user's language, e.g. login/auth/암호화/encryption), call this (more than once if needed), read each candidate's one-line summary, and pick the best fit — then call `convert` with that session. A keyword miss falls back to recent sessions so you can still browse.",
             "inputSchema": {
                 "type": "object",
                 "required": ["from"],
                 "properties": {
                     "from": { "type": "string", "description": "harness to search, e.g. codex" },
-                    "query": { "type": "string", "description": "description keywords, e.g. 'asset engagement structure'" },
+                    "query": { "type": "string", "description": "candidate keywords describing the session" },
                     "latest": { "type": "boolean", "description": "return only the most recent session" }
                 }
             }
@@ -136,14 +136,25 @@ fn call_inner(params: Option<&Value>) -> Result<String> {
             }
             let q = get("query").ok_or_else(|| anyhow::anyhow!("'query' or 'latest' required"))?;
             let hits = find::search(a.as_ref(), &q, 8)?;
-            if hits.is_empty() {
-                return Ok(format!("no {from} session matched \"{q}\""));
-            }
-            Ok(hits
-                .iter()
-                .map(|h| format!("[{} terms] {}\t{}", h.terms_matched, h.reference.locator, label(&h.reference)))
-                .collect::<Vec<_>>()
-                .join("\n"))
+            let (header, hits) = if hits.is_empty() {
+                (format!("no keyword match for \"{q}\" — recent sessions to pick from:\n"),
+                 find::browse(a.as_ref(), 8)?)
+            } else {
+                (String::new(), hits)
+            };
+            Ok(header
+                + &hits
+                    .iter()
+                    .map(|h| {
+                        format!(
+                            "{}\n    {}\n    {}",
+                            h.summary.clone().unwrap_or_else(|| label(&h.reference)),
+                            h.reference.locator,
+                            h.reference.cwd.clone().unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"))
         }
         "inspect" => {
             let from = get("from").ok_or_else(|| anyhow::anyhow!("'from' required"))?;

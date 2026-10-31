@@ -161,15 +161,28 @@ fn find_cmd(from: &str, query: &str, latest: bool, limit: usize) -> Result<()> {
     }
     let hits = find::search(a.as_ref(), query, limit)?;
     if hits.is_empty() {
-        println!("[{}] no session matched \"{}\"", a.name(), query);
+        println!("[{}] no keyword match for \"{}\" — showing recent sessions to browse:", a.name(), query);
+        for h in &find::browse(a.as_ref(), limit)? {
+            print_hit(h);
+        }
         return Ok(());
     }
     println!("[{}] {} match(es) for \"{}\":", a.name(), hits.len(), query);
     for h in &hits {
-        print!("  [{} terms] ", h.terms_matched);
-        print_ref(&h.reference);
+        print_hit(h);
     }
     Ok(())
+}
+
+fn print_hit(h: &find::Hit) {
+    let when = h.reference.modified.clone()
+        .or_else(|| mtime_str(std::path::Path::new(&h.reference.locator)));
+    let tag = if h.terms_matched > 0 { format!("[{} terms] ", h.terms_matched) } else { String::new() };
+    println!("  {}{}", tag, when.as_deref().unwrap_or("-"));
+    if let Some(sum) = &h.summary {
+        println!("    {sum}");
+    }
+    println!("    {}", h.reference.locator);
 }
 
 /// Resolve the source session from an explicit path, `--match`, or `--latest`.
