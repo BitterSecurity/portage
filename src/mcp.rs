@@ -6,6 +6,7 @@
 
 use crate::adapters;
 use crate::convert::{self, ConvertOpts, Mode};
+use crate::find;
 use crate::harness::WriteOpts;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -60,6 +61,19 @@ fn tool_defs() -> Value {
             }
         },
         {
+            "name": "find",
+            "description": "Find sessions in a harness by description keywords and/or recency. Use this to locate the session the user described before converting it.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["from"],
+                "properties": {
+                    "from": { "type": "string", "description": "harness to search, e.g. codex" },
+                    "query": { "type": "string", "description": "description keywords, e.g. 'asset engagement structure'" },
+                    "latest": { "type": "boolean", "description": "return only the most recent session" }
+                }
+            }
+        },
+        {
             "name": "inspect",
             "description": "Show the parsed structure of one session.",
             "inputSchema": {
@@ -73,14 +87,16 @@ fn tool_defs() -> Value {
         },
         {
             "name": "convert",
-            "description": "Convert a session from one harness into another and register it so the target can resume it.",
+            "description": "Convert a session from one harness into another and register it so the target can resume it. Identify the source by `session` (path), `match` (description keywords), or `latest`.",
             "inputSchema": {
                 "type": "object",
-                "required": ["from", "to", "session"],
+                "required": ["from", "to"],
                 "properties": {
                     "from": { "type": "string" },
                     "to": { "type": "string" },
-                    "session": { "type": "string" },
+                    "session": { "type": "string", "description": "exact session locator/path" },
+                    "match": { "type": "string", "description": "find the source session by description keywords" },
+                    "latest": { "type": "boolean", "description": "use the most recent source session" },
                     "cwd": { "type": "string" },
                     "mode": { "type": "string", "enum": ["handoff", "replay"], "description": "handoff (default) = compact briefing + recent tail; replay = full 1:1" }
                 }
@@ -109,6 +125,26 @@ fn call_inner(params: Option<&Value>) -> Result<String> {
             let refs = a.list()?;
             Ok(refs.into_iter().map(|r| r.locator).collect::<Vec<_>>().join("\n"))
         }
+        "find" => {
+            let from = get("from").ok_or_else(|| anyhow::anyhow!("'from' required"))?;
+            let a = adapters::by_name(&from)?;
+            if args.get("latest").and_then(Value::as_bool) == Some(true) {
+                return Ok(match find::latest(a.as_ref())? {
+                    Some(r) => format!("{}\t{}", r.locator, label(&r)),
+                    None => "(no sessions)".into(),
+                });
+            }
+            let q = get("query").ok_or_else(|| anyhow::anyhow!("'query' or 'latest' required"))?;
+            let hits = find::search(a.as_ref(), &q, 8)?;
+            if hits.is_empty() {
+                return Ok(format!("no {from} session matched \"{q}\""));
+            }
+            Ok(hits
+                .iter()
+                .map(|h| format!("[{} terms] {}\t{}", h.terms_matched, h.reference.locator, label(&h.reference)))
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
         "inspect" => {
             let from = get("from").ok_or_else(|| anyhow::anyhow!("'from' required"))?;
             let session = get("session").ok_or_else(|| anyhow::anyhow!("'session' required"))?;
@@ -118,9 +154,23 @@ fn call_inner(params: Option<&Value>) -> Result<String> {
         "convert" => {
             let from = get("from").ok_or_else(|| anyhow::anyhow!("'from' required"))?;
             let to = get("to").ok_or_else(|| anyhow::anyhow!("'to' required"))?;
-            let session = get("session").ok_or_else(|| anyhow::anyhow!("'session' required"))?;
             let src = adapters::by_name(&from)?;
             let dst = adapters::by_name(&to)?;
+            let locator = if let Some(s) = get("session") {
+                s
+            } else if args.get("latest").and_then(Value::as_bool) == Some(true) {
+                find::latest(src.as_ref())?
+                    .map(|r| r.locator)
+                    .ok_or_else(|| anyhow::anyhow!("no sessions in {from}"))?
+            } else if let Some(q) = get("match") {
+                find::search(src.as_ref(), &q, 1)?
+                    .into_iter()
+                    .next()
+                    .map(|h| h.reference.locator)
+                    .ok_or_else(|| anyhow::anyhow!("no {from} session matched \"{q}\""))?
+            } else {
+                anyhow::bail!("provide 'session', 'match', or 'latest'");
+            };
             let mode = match get("mode").as_deref() {
                 Some("replay") => Mode::Replay,
                 _ => Mode::Handoff,
@@ -130,9 +180,13 @@ fn call_inner(params: Option<&Value>) -> Result<String> {
                 tail: 8,
                 write: WriteOpts { handshake: true, cwd_override: get("cwd"), force: false },
             };
-            let (outcome, report) = convert::run(src.as_ref(), dst.as_ref(), &session, &opts)?;
-            Ok(format!("{}\nresume: {}", report.notes.join("; "), outcome.resume_hint))
+            let (outcome, report) = convert::run(src.as_ref(), dst.as_ref(), &locator, &opts)?;
+            Ok(format!("source: {locator}\n{}\nresume: {}", report.notes.join("; "), outcome.resume_hint))
         }
         other => anyhow::bail!("unknown tool: {other}"),
     }
+}
+
+fn label(r: &crate::harness::SessionRef) -> String {
+    r.title.clone().or_else(|| r.cwd.clone()).unwrap_or_default()
 }

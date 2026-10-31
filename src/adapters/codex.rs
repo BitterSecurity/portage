@@ -69,11 +69,12 @@ impl Adapter for Codex {
                             .map(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
                             .unwrap_or(false);
                         if is_rollout {
+                            let (cwd, title) = codex_meta(&p);
                             out.push(SessionRef {
                                 locator: p.to_string_lossy().into_owned(),
-                                title: None,
-                                cwd: None,
-                                modified: None,
+                                title,
+                                cwd,
+                                modified: crate::harness::mtime_str(&p),
                             });
                         }
                     }
@@ -160,6 +161,48 @@ fn extract_text(content: &Value) -> String {
             .join(""),
         _ => String::new(),
     }
+}
+
+/// Cheap metadata for `list`/`find`: cwd from session_meta, title from the
+/// first real user prompt (skipping injected `<...>` context), reading only a
+/// prefix of the rollout.
+fn codex_meta(path: &std::path::Path) -> (Option<String>, Option<String>) {
+    let text = match crate::harness::read_prefix(path, 32 * 1024) {
+        Some(t) => t,
+        None => return (None, None),
+    };
+    let mut cwd = None;
+    let mut title = None;
+    for line in text.lines() {
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let payload = v.get("payload");
+        if cwd.is_none() {
+            cwd = payload
+                .and_then(|p| p.get("cwd"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if title.is_none() {
+            if let Some(p) = payload {
+                if p.get("type").and_then(Value::as_str) == Some("message")
+                    && p.get("role").and_then(Value::as_str) == Some("user")
+                {
+                    let t = extract_text(p.get("content").unwrap_or(&Value::Null));
+                    let t = t.trim();
+                    if !t.is_empty() && !t.starts_with('<') {
+                        title = Some(t.chars().take(70).collect::<String>());
+                    }
+                }
+            }
+        }
+        if cwd.is_some() && title.is_some() {
+            break;
+        }
+    }
+    (cwd, title)
 }
 
 fn response_item_to_message(p: &Value) -> Option<Message> {

@@ -3,17 +3,23 @@
 //! Resume: `claude --resume` — which only finds the session when the
 //! encoded-cwd directory matches the dir `claude` is launched from.
 //!
-//! NOTE ON FIDELITY: the field mapping below follows the public shape of
-//! Claude Code transcripts (Anthropic message content blocks). It is exercised
-//! by synthetic round-trip fixtures. Before trusting a *real* resume, verify
-//! against your installed Claude Code version with `portage inspect`.
+//! The writer emits the real resume-relevant schema verified against live
+//! Claude Code stores: a `uuid`/`parentUuid` linked chain plus `sessionId`,
+//! `cwd`, `version`, `gitBranch`, `userType`, `isSidechain`, `entrypoint` on
+//! every user/assistant line. Without the uuid chain the resume picker will not
+//! list the session.
 
-use crate::harness::{Adapter, SessionRef, WriteOpts, WriteOutcome};
+use crate::harness::{mtime_str, Adapter, SessionRef, WriteOpts, WriteOutcome};
 use crate::ir::{Block, Message, Role, Session};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+
+/// Claude Code version stamped on written lines (resume is tolerant of this).
+const CC_VERSION: &str = "2.1.316";
 
 pub struct ClaudeCode {
     root: PathBuf,
@@ -43,7 +49,6 @@ pub fn encode_cwd(cwd: &str) -> String {
 fn content_to_blocks(content: &Value) -> Vec<Block> {
     let items = match content {
         Value::Array(a) => a.clone(),
-        // A bare string is plain text.
         Value::String(s) => return vec![Block::Text { text: s.clone() }],
         _ => return vec![],
     };
@@ -89,11 +94,11 @@ fn blocks_to_content(blocks: &[Block]) -> Value {
     Value::Array(items)
 }
 
-fn role_str(r: Role) -> &'static str {
+/// Line `type`. System is folded into a user line (rare; handoff never emits it).
+fn line_type(r: Role) -> &'static str {
     match r {
-        Role::User => "user",
         Role::Assistant => "assistant",
-        Role::System => "system",
+        _ => "user",
     }
 }
 fn parse_role(s: &str) -> Role {
@@ -102,6 +107,16 @@ fn parse_role(s: &str) -> Role {
         "system" => Role::System,
         _ => Role::User,
     }
+}
+
+fn git_branch(cwd: &str) -> String {
+    Command::new("git")
+        .args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 impl Adapter for ClaudeCode {
@@ -122,14 +137,16 @@ impl Adapter for ClaudeCode {
             }
             for f in fs::read_dir(&proj)? {
                 let p = f?.path();
-                if p.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                    out.push(SessionRef {
-                        locator: p.to_string_lossy().into_owned(),
-                        title: None,
-                        cwd: Some(proj.file_name().unwrap().to_string_lossy().into_owned()),
-                        modified: None,
-                    });
+                if p.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
                 }
+                let (cwd, title) = cc_meta(&p);
+                out.push(SessionRef {
+                    locator: p.to_string_lossy().into_owned(),
+                    title,
+                    cwd,
+                    modified: mtime_str(&p),
+                });
             }
         }
         Ok(out)
@@ -154,7 +171,7 @@ impl Adapter for ClaudeCode {
             }
             let msg = match v.get("message") {
                 Some(m) => m,
-                None => continue, // skip non-message events (summaries etc.)
+                None => continue,
             };
             let role = parse_role(msg.get("role").and_then(Value::as_str).unwrap_or("user"));
             let blocks = content_to_blocks(msg.get("content").unwrap_or(&Value::Null));
@@ -180,18 +197,40 @@ impl Adapter for ClaudeCode {
         fs::create_dir_all(&dir)?;
         let sid = uuid::Uuid::new_v4().to_string();
         let path = dir.join(format!("{sid}.jsonl"));
+        let branch = git_branch(&cwd);
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default();
 
         let mut lines = String::new();
+        let mut parent: Option<String> = None;
         for m in &session.messages {
+            let uuid = uuid::Uuid::new_v4().to_string();
+            let ts = m.timestamp.clone().unwrap_or_else(|| now.clone());
+            let message = if m.role == Role::Assistant {
+                json!({
+                    "role": "assistant", "type": "message", "id": format!("msg_{uuid}"),
+                    "model": "claude-sonnet-4-5", "content": blocks_to_content(&m.blocks),
+                    "stop_reason": "end_turn", "usage": {"input_tokens": 0, "output_tokens": 0},
+                })
+            } else {
+                json!({ "role": "user", "content": blocks_to_content(&m.blocks) })
+            };
             let line = json!({
-                "type": role_str(m.role),
+                "type": line_type(m.role),
+                "uuid": uuid,
+                "parentUuid": parent,
                 "sessionId": sid,
+                "timestamp": ts,
                 "cwd": cwd,
-                "timestamp": m.timestamp,
-                "message": { "role": role_str(m.role), "content": blocks_to_content(&m.blocks) },
+                "version": CC_VERSION,
+                "gitBranch": branch,
+                "userType": "external",
+                "isSidechain": false,
+                "entrypoint": "sdk-cli",
+                "message": message,
             });
             lines.push_str(&serde_json::to_string(&line)?);
             lines.push('\n');
+            parent = Some(uuid);
         }
         fs::write(&path, lines)?;
 
@@ -201,4 +240,48 @@ impl Adapter for ClaudeCode {
             resume_hint: format!("cd {cwd} && claude --resume {sid}"),
         })
     }
+}
+
+/// Cheap metadata for `list`: cwd from the first line carrying one, title from
+/// an `ai-title` line or the first user text snippet.
+fn cc_meta(path: &std::path::Path) -> (Option<String>, Option<String>) {
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return (None, None),
+    };
+    let mut cwd = None;
+    let mut title = None;
+    let mut first_user = None;
+    for line in text.lines() {
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if cwd.is_none() {
+            cwd = v.get("cwd").and_then(Value::as_str).map(str::to_string);
+        }
+        if title.is_none() {
+            title = v.get("aiTitle").and_then(Value::as_str).map(str::to_string);
+        }
+        if first_user.is_none() && v.get("type").and_then(Value::as_str) == Some("user") {
+            if let Some(m) = v.get("message") {
+                let t = match m.get("content") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Array(a)) => a
+                        .iter()
+                        .filter_map(|c| c.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    _ => String::new(),
+                };
+                if !t.trim().is_empty() {
+                    first_user = Some(t.chars().take(70).collect::<String>());
+                }
+            }
+        }
+        if cwd.is_some() && title.is_some() {
+            break;
+        }
+    }
+    (cwd, title.or(first_user))
 }

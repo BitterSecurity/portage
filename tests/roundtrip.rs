@@ -195,6 +195,33 @@ fn handoff_mode_compresses_and_drops_reasoning() {
 }
 
 #[test]
+fn find_ranks_by_description() {
+    use portage::find;
+    let dir = tempfile::tempdir().unwrap();
+    let cc = adapters::by_name_with_root("claude-code", Some(dir.path().to_path_buf())).unwrap();
+
+    let mut mk = |text: &str| {
+        let mut s = Session::new("test");
+        s.cwd = Some("/home/u/proj".into());
+        s.messages = vec![Message {
+            role: Role::User,
+            blocks: vec![Block::Text { text: text.into() }],
+            timestamp: None,
+        }];
+        cc.write(&s, &WriteOpts::default()).unwrap();
+    };
+    mk("refactor the authentication widget module");
+    mk("fix the billing gadget invoice bug");
+
+    let hits = find::search(cc.as_ref(), "authentication widget", 5).unwrap();
+    assert!(!hits.is_empty());
+    let top = std::fs::read_to_string(&hits[0].reference.locator).unwrap();
+    assert!(top.contains("widget"), "top hit should be the widget session");
+    // a query matching neither returns nothing
+    assert!(find::search(cc.as_ref(), "nonexistentxyz", 5).unwrap().is_empty());
+}
+
+#[test]
 fn redact_masks_secrets() {
     let r = portage::digest::redact("token sk-ABCD1234efgh5678IJKL90mnop here");
     assert!(r.contains("[redacted]"), "got: {r}");

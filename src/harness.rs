@@ -6,7 +6,24 @@
 
 use crate::ir::Session;
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Read up to `max` bytes of a file (keeps session search/listing fast on huge
+/// transcripts). A truncated trailing line simply fails to parse and is skipped.
+pub fn read_prefix(path: &Path, max: usize) -> Option<String> {
+    use std::io::Read;
+    let f = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    f.take(max as u64).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// RFC3339 modified-time of a file, for session listings. None if unavailable.
+pub fn mtime_str(path: &Path) -> Option<String> {
+    let m = std::fs::metadata(path).ok()?.modified().ok()?;
+    let dt: time::OffsetDateTime = m.into();
+    dt.format(&time::format_description::well_known::Rfc3339).ok()
+}
 
 /// A reference to a session found in a harness store, as `list` returns it.
 #[derive(Debug, Clone)]

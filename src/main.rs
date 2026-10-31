@@ -1,9 +1,9 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use portage::adapters;
-use portage::convert;
-use portage::harness::WriteOpts;
+use portage::harness::{mtime_str, WriteOpts};
 use portage::ir::{Block, Session};
+use portage::{convert, find};
 
 #[derive(Parser)]
 #[command(
@@ -23,6 +23,18 @@ enum Cmd {
         #[arg(long)]
         from: Option<String>,
     },
+    /// Find sessions in a harness by description keywords and/or recency.
+    Find {
+        /// Description keywords (optional if --latest).
+        query: Vec<String>,
+        #[arg(long)]
+        from: String,
+        /// Show only the most recently modified session.
+        #[arg(long)]
+        latest: bool,
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+    },
     /// Show the parsed structure of one session.
     Inspect {
         session: String,
@@ -30,12 +42,22 @@ enum Cmd {
         from: String,
     },
     /// Convert a session from one harness into another and register it.
+    ///
+    /// Identify the source session by path, by `--match <keywords>`, or
+    /// `--latest`.
     Convert {
-        session: String,
+        /// Session locator/path (omit if using --match or --latest).
+        session: Option<String>,
         #[arg(long)]
         from: String,
         #[arg(long)]
         to: String,
+        /// Find the source session by description keywords instead of a path.
+        #[arg(long = "match")]
+        match_query: Option<String>,
+        /// Use the most recent source session.
+        #[arg(long)]
+        latest: bool,
         /// handoff = compact briefing + recent tail (default); replay = full 1:1.
         #[arg(long, default_value = "handoff")]
         mode: String,
@@ -61,10 +83,13 @@ enum Cmd {
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::List { from } => list(from),
+        Cmd::Find { query, from, latest, limit } => find_cmd(&from, &query.join(" "), latest, limit),
         Cmd::Inspect { session, from } => inspect(&from, &session),
-        Cmd::Convert { session, from, to, mode, tail, cwd, no_handshake, force } => {
+        Cmd::Convert { session, from, to, mode, tail, match_query, latest, cwd, no_handshake, force } => {
             let src = adapters::by_name(&from)?;
             let dst = adapters::by_name(&to)?;
+            let locator = resolve_locator(src.as_ref(), session, match_query, latest)?;
+            eprintln!("source session: {locator}");
             let mode = match mode.as_str() {
                 "handoff" => convert::Mode::Handoff,
                 "replay" => convert::Mode::Replay,
@@ -75,7 +100,7 @@ fn main() -> Result<()> {
                 tail,
                 write: WriteOpts { handshake: !no_handshake, cwd_override: cwd, force },
             };
-            let (outcome, report) = convert::run(src.as_ref(), dst.as_ref(), &session, &opts)?;
+            let (outcome, report) = convert::run(src.as_ref(), dst.as_ref(), &locator, &opts)?;
             for n in &report.notes {
                 eprintln!("• {n}");
             }
@@ -108,13 +133,85 @@ fn list(from: Option<String>) -> Result<()> {
     };
     for name in names {
         let a = adapters::by_name(name)?;
-        let refs = a.list()?;
+        let mut refs = a.list()?;
+        // newest first by modified (fall back to locator mtime)
+        refs.sort_by(|x, y| ref_mtime(y).cmp(&ref_mtime(x)));
         println!("[{}] {} session(s)", a.name(), refs.len());
-        for r in refs {
-            println!("  {}", r.locator);
+        for r in &refs {
+            print_ref(r);
         }
     }
     Ok(())
+}
+
+fn find_cmd(from: &str, query: &str, latest: bool, limit: usize) -> Result<()> {
+    let a = adapters::by_name(from)?;
+    if latest {
+        match find::latest(a.as_ref())? {
+            Some(r) => {
+                println!("[{}] most recent:", a.name());
+                print_ref(&r);
+            }
+            None => println!("[{}] no sessions found", a.name()),
+        }
+        return Ok(());
+    }
+    if query.trim().is_empty() {
+        bail!("give description keywords, or pass --latest");
+    }
+    let hits = find::search(a.as_ref(), query, limit)?;
+    if hits.is_empty() {
+        println!("[{}] no session matched \"{}\"", a.name(), query);
+        return Ok(());
+    }
+    println!("[{}] {} match(es) for \"{}\":", a.name(), hits.len(), query);
+    for h in &hits {
+        print!("  [{} terms] ", h.terms_matched);
+        print_ref(&h.reference);
+    }
+    Ok(())
+}
+
+/// Resolve the source session from an explicit path, `--match`, or `--latest`.
+fn resolve_locator(
+    src: &dyn portage::harness::Adapter,
+    session: Option<String>,
+    match_query: Option<String>,
+    latest: bool,
+) -> Result<String> {
+    if let Some(s) = session {
+        return Ok(s);
+    }
+    if latest {
+        return find::latest(src)?
+            .map(|r| r.locator)
+            .ok_or_else(|| anyhow::anyhow!("no sessions found in {}", src.name()));
+    }
+    if let Some(q) = match_query {
+        let hits = find::search(src, &q, 5)?;
+        let top = hits
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no {} session matched \"{}\"", src.name(), q))?;
+        if hits.len() > 1 {
+            eprintln!(
+                "note: {} candidates matched; picked the strongest. Use `portage find` to review.",
+                hits.len()
+            );
+        }
+        return Ok(top.reference.locator.clone());
+    }
+    bail!("specify a session path, --match <keywords>, or --latest")
+}
+
+fn ref_mtime(r: &portage::harness::SessionRef) -> Option<std::time::SystemTime> {
+    std::fs::metadata(&r.locator).ok().and_then(|m| m.modified().ok())
+}
+
+fn print_ref(r: &portage::harness::SessionRef) {
+    let when = r.modified.clone().or_else(|| mtime_str(std::path::Path::new(&r.locator)));
+    let label = r.title.clone().or_else(|| r.cwd.clone()).unwrap_or_default();
+    println!("  {:<20} {}", when.as_deref().unwrap_or("-"), label);
+    println!("    {}", r.locator);
 }
 
 fn inspect(from: &str, locator: &str) -> Result<()> {
