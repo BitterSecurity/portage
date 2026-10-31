@@ -148,26 +148,63 @@ impl Adapter for Codex {
     }
 }
 
+/// Text from a Codex content field that may be a string or an array of
+/// `{type, text}` items (input_text / output_text).
+fn extract_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|c| c.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => String::new(),
+    }
+}
+
 fn response_item_to_message(p: &Value) -> Option<Message> {
     match p.get("type").and_then(Value::as_str) {
+        // Real Codex rollouts use `message` (with roles user/assistant/system/
+        // developer) and, in some versions, `agent_message` for model output.
         Some("message") => {
             let role = match p.get("role").and_then(Value::as_str) {
                 Some("assistant") => Role::Assistant,
-                Some("system") => Role::System,
+                Some("system") | Some("developer") => Role::System,
                 _ => Role::User,
             };
-            let text = p
-                .get("content")
-                .and_then(Value::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|c| c.get("text").and_then(Value::as_str))
-                        .collect::<Vec<_>>()
-                        .join("")
-                })
-                .unwrap_or_default();
+            let text = extract_text(p.get("content").unwrap_or(&Value::Null));
             Some(Message { role, blocks: vec![Block::Text { text }], timestamp: None })
         }
+        Some("agent_message") => Some(Message {
+            role: Role::Assistant,
+            blocks: vec![Block::Text { text: extract_text(p.get("content").unwrap_or(&Value::Null)) }],
+            timestamp: None,
+        }),
+        // `function_call` (arguments: json string) and `custom_tool_call`
+        // (input: value) are both tool invocations.
+        Some("function_call") | Some("custom_tool_call") => Some(Message {
+            role: Role::Assistant,
+            blocks: vec![Block::ToolCall {
+                id: p.get("call_id").and_then(Value::as_str).unwrap_or("").to_string(),
+                name: p.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                input: p
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .map(args_to_value)
+                    .or_else(|| p.get("input").cloned())
+                    .unwrap_or(Value::Null),
+            }],
+            timestamp: None,
+        }),
+        Some("function_call_output") | Some("custom_tool_call_output") => Some(Message {
+            role: Role::User,
+            blocks: vec![Block::ToolResult {
+                call_id: p.get("call_id").and_then(Value::as_str).unwrap_or("").to_string(),
+                output: p.get("output").cloned().unwrap_or(Value::Null),
+                is_error: false,
+            }],
+            timestamp: None,
+        }),
         Some("reasoning") => {
             let text = p
                 .get("summary")
@@ -181,24 +218,6 @@ fn response_item_to_message(p: &Value) -> Option<Message> {
                 .unwrap_or_default();
             Some(Message { role: Role::Assistant, blocks: vec![Block::Reasoning { text }], timestamp: None })
         }
-        Some("function_call") => Some(Message {
-            role: Role::Assistant,
-            blocks: vec![Block::ToolCall {
-                id: p.get("call_id").and_then(Value::as_str).unwrap_or("").to_string(),
-                name: p.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
-                input: args_to_value(p.get("arguments").and_then(Value::as_str).unwrap_or("")),
-            }],
-            timestamp: None,
-        }),
-        Some("function_call_output") => Some(Message {
-            role: Role::User,
-            blocks: vec![Block::ToolResult {
-                call_id: p.get("call_id").and_then(Value::as_str).unwrap_or("").to_string(),
-                output: p.get("output").cloned().unwrap_or(Value::Null),
-                is_error: false,
-            }],
-            timestamp: None,
-        }),
         _ => None,
     }
 }

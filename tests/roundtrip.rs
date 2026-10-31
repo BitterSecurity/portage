@@ -148,6 +148,40 @@ fn convert_codex_to_qwen_and_kimi() {
 }
 
 #[test]
+fn opencode_reader_maps_parts() {
+    // Minimal real opencode schema (session/message/part with JSON `data`).
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let db = root.join(".local/share/opencode/opencode.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE session(id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER);
+         CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+         CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT);
+         INSERT INTO session VALUES('s1','/tmp/p','t',1,1);
+         INSERT INTO message VALUES('m1','s1',1,'{\"role\":\"user\"}');
+         INSERT INTO part VALUES('p1','m1','s1','{\"type\":\"text\",\"text\":\"hi\"}');
+         INSERT INTO message VALUES('m2','s1',2,'{\"role\":\"assistant\"}');
+         INSERT INTO part VALUES('p2','m2','s1','{\"type\":\"reasoning\",\"text\":\"think\"}');
+         INSERT INTO part VALUES('p3','m2','s1','{\"type\":\"text\",\"text\":\"answer\"}');
+         INSERT INTO part VALUES('p4','m2','s1','{\"type\":\"tool\",\"callID\":\"c1\",\"tool\":\"read\",\"state\":{\"input\":{\"p\":\"a\"},\"output\":\"ok\",\"status\":\"completed\"}}');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let oc = adapters::by_name_with_root("opencode", Some(root)).unwrap();
+    let s = oc.read("s1").unwrap();
+    assert_eq!(s.cwd.as_deref(), Some("/tmp/p"));
+    assert_eq!(s.messages.len(), 2);
+    let k = block_kinds(&s);
+    assert_eq!(k.get("text"), Some(&2)); // hi + answer
+    assert_eq!(k.get("reasoning"), Some(&1));
+    assert_eq!(k.get("call"), Some(&1));
+    assert_eq!(k.get("result"), Some(&1)); // tool part had output
+}
+
+#[test]
 fn codex_index_registration_inserts_row() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_path_buf();

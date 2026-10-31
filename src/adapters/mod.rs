@@ -5,6 +5,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod copilot;
 pub mod kimi;
+pub mod opencode;
 pub mod qwen;
 
 use crate::harness::Adapter;
@@ -30,6 +31,7 @@ pub const SUPPORTED: &[(&str, bool, bool)] = &[
     ("copilot", true, false),
     ("qwen", true, true),
     ("kimi", true, true),
+    ("opencode", true, false),
 ];
 
 pub fn by_name(name: &str) -> Result<Box<dyn Adapter>> {
@@ -50,6 +52,7 @@ pub fn by_name_with_root(name: &str, root: Option<PathBuf>) -> Result<Box<dyn Ad
         "copilot" | "copilot-cli" => Box::new(copilot::Copilot::new_opt(root)),
         "qwen" | "qwen-code" => Box::new(qwen::Qwen::new_opt(root)),
         "kimi" | "kimi-code" => Box::new(kimi::Kimi::new_opt(root)),
+        "opencode" => Box::new(opencode::OpenCode::new_opt(root)),
         other => return Err(anyhow!("unknown or unsupported harness: '{other}' (see `portage list`)")),
     })
 }

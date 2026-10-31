@@ -19,21 +19,31 @@ source store ──reader──▶ IR ──writer──▶ target store ──�
 
 ## Status
 
-Early. Fully implemented and tested today:
+| harness      | source | target | verification |
+|--------------|:------:|:------:|--------------|
+| Claude Code  | ✅ | ✅ | **real files** (read validated against 292 live sessions) |
+| Codex CLI    | ✅ | ✅ | **real files** (read validated incl. function/custom tool calls, reasoning) |
+| opencode     | ✅ | — | **real DB** (read validated against a 57k-part live session) |
+| Qwen Code    | ✅ | ✅ | synthetic round-trip only |
+| Kimi Code    | ✅ | ✅ | synthetic round-trip only |
+| Copilot CLI  | ✅ | — | tolerant reader, unverified |
 
-| harness      | source | target |
-|--------------|:------:|:------:|
-| Claude Code  | ✅ | ✅ |
-| Codex CLI    | ✅ | ✅ |
-| Qwen Code    | ✅ | ✅ |
-| Kimi Code    | ✅ | ✅ |
-| Copilot CLI  | ✅ | — (read-only for now) |
+**Verification levels.** "real files/DB" = the reader was run against real
+sessions on a live install and its parsed block counts matched ground truth.
+"synthetic" = internally consistent round-trip against fixtures in the expected
+format, but not yet confirmed against a real install. On-disk formats are
+vendor-private and reverse-engineered — always confirm a real resume with
+`portage inspect` against your installed version.
 
-More harnesses (Gemini/Antigravity, opencode, Goose, Hermes, OpenClaw —
-the SQLite-backed ones) are specified in `docs/superpowers/specs/` and plug in as
-`reader`/`writer`/`registrar` adapters. **On-disk formats are vendor-private and
-reverse-engineered** — a converted session is verified by round-trip against
-synthetic fixtures; always confirm a real resume against your installed version.
+**Not yet implemented** (no reliable way to verify without the tool present, and
+writing speculative rows into a live store risks corruption): Goose, Hermes,
+OpenClaw (empty stores locally). Antigravity's local form is task markdown +
+media, not a turn transcript, so it is not a clean source. These are specified
+in `docs/superpowers/specs/` and plug in as `reader`/`writer`/`registrar`
+adapters once a real install is available to validate against.
+
+Writing into opencode is deliberately omitted: its event-sourced multi-table
+store (session/message/part + project linkage) is read as a source only.
 
 ## Install
 
