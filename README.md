@@ -45,7 +45,7 @@ Both are backed by research and real-install validation — see
 |--------------|:------:|:------:|--------------|
 | Claude Code  | ✅ | ✅ | **real** — read + `claude --resume` round-trip verified |
 | Codex CLI    | ✅ | ✅ | **real** — read verified incl. function/custom tool calls, reasoning |
-| opencode     | ✅ | —  | **real DB** — read verified on a 57k-part live session |
+| opencode     | ✅ | ✅ | **real** — read verified on a 57k-part live session; write verified on a live opencode-compatible store: converted session listed and resumed natively |
 | Qwen Code    | ✅ | ✅ | synthetic round-trip |
 | Kimi Code    | ✅ | ✅ | synthetic round-trip |
 | Copilot CLI  | ✅ | —  | tolerant reader, unverified |
@@ -55,6 +55,13 @@ matched ground truth, and (Codex→Claude Code) `claude --resume` loaded the
 converted session and restated the task. On-disk formats are vendor-private and
 reverse-engineered; confirm a real resume with `portage inspect` against your
 installed version.
+
+opencode's store is a live multi-table SQLite database, so the writer
+registers rows the same way the app itself does — one transaction, session +
+message chain + parts, tool results merged into their call's `tool` part. No
+event rows are needed (the materialized tables are the source of truth).
+opencode-compatible forks that keep their own data dir work via
+`PORTAGE_OPENCODE_DB`.
 
 Not yet implemented (no local install to validate against, and speculative
 writes into a live store risk corruption): Goose, Hermes, OpenClaw. Amp
@@ -99,6 +106,36 @@ encoded-cwd directory matches where you launch `claude`.
   turns. Reasoning and stale tool output dropped; secrets redacted. Best for
   *continuing work*.
 - `--mode replay` — faithful 1:1 of every message, for archival/debugging.
+
+### Workspace context
+
+Both modes carry a **workspace snapshot** of the source work tree, captured at
+convert time: repo/remote, branch @ HEAD, uncommitted files, recent commits.
+The target agent resumes knowing which branch it is on and what was in flight —
+without stale file contents (files live on disk; the brief points at them).
+Non-git directories simply omit the section. `--cwd` overrides the tree
+inspected, and doubles as the resume directory.
+
+### Output format
+
+Every command renders the same way by default: **TOON** (Token-Oriented Object
+Notation, tab-delimited) — uniform tables at ~30–55% fewer tokens than JSON
+with equal retrieval accuracy, plus `[N]`/`{fields}` headers that make
+truncation detectable. `--format json` for scripts, `--format text` for plain
+lines; set `PORTAGE_FORMAT` to pin a default.
+
+```sh
+$ portage find --from claude-code "login encryption" --limit 2
+from: claude-code
+query: login encryption
+latest: false
+hits[2	]{terms	modified	title	cwd	summary	locator}:
+  2	2026-11-02T10:37:00Z	login page	/home/u/proj	fix login password…	/home/u/.claude/projects/…/a.jsonl
+  1	2026-11-01T18:02:00Z	auth refactor	/home/u/proj2	refactor auth flow…	/home/u/.claude/projects/…/b.jsonl
+```
+
+`convert` prints `target_session_id`, the exact `resume:` command, artifacts,
+and conversion notes in the same format (notes also go to stderr as `•` lines).
 
 ## Thin wrappers: MCP + skill
 

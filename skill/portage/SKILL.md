@@ -9,8 +9,9 @@ description: Use when the user wants to continue/resume work from a DIFFERENT co
 one and makes it resumable here. It is a single binary (`portage`); this skill
 is a thin wrapper over it.
 
-Supported sources/targets: Claude Code, Codex, Qwen, Kimi (read+write);
-opencode, Copilot (read-only source).
+Supported sources/targets: Claude Code, Codex, Qwen, Kimi, opencode
+(read+write); Copilot (read-only source). opencode-compatible forks that keep
+their own data dir work with `PORTAGE_OPENCODE_DB=<path to their db>`.
 
 ## Flow
 
@@ -18,25 +19,34 @@ opencode, Copilot (read-only source).
    memory. YOU do the semantic matching — do not expect exact keywords.
    - Extract candidate keywords, including synonyms and both English and the
      user's own language (e.g. login / auth / 암호화 / encryption / bcrypt).
-   - `portage find --from <source> "<keywords>"` — ranked candidates, each with
-     a one-line summary (task · files · tools). Run it more than once with
-     different keywords if unsure.
+   - `portage find --from <source> "<keywords>"` — ranked candidates in TOON
+     (tab-delimited tables; `[N]` = row count, `{fields}` = columns). Each hit
+     carries a one-line summary (task · files · tools). Run it more than once
+     with different keywords if unsure. Output looks like:
+
+     ```
+     hits[2	]{terms	modified	title	cwd	summary	locator}:
+       2	2026-11-02T10:37:00Z	login page	/home/u/proj	fix login password…	/home/u/.claude/projects/…/a.jsonl
+     ```
+
    - `portage find --from <source> --latest` for "the most recent one".
-   - A keyword miss falls back to recent sessions to browse.
+   - A keyword miss falls back to recent sessions to browse (stderr notes it).
    - Read the summaries and pick the best fit. If genuinely ambiguous, show the
      user the top 2–3 summaries and ask which.
 
 2. **Convert into the current harness.**
    `portage convert --from <source> --to <current> --match "<keywords>" --cwd "$PWD"`
    (or `--session <path>` once you know it, or `--latest`).
-   - `--cwd` matters for Claude Code: use the directory the user will launch
-     `claude` from, or resume won't find it.
+   - `--cwd` matters: it registers the session under the directory the user
+     will launch the target from (required for Claude Code resume), and drives
+     the workspace snapshot (repo, branch, uncommitted files) embedded in the
+     handoff brief.
    - Default `--mode handoff` carries a compact briefing + recent turns (best
      for continuing work). `--mode replay` is a full 1:1 copy.
 
-3. **Report the printed resume command verbatim** (e.g.
-   `cd <cwd> && claude --resume <id>`), plus any `•` conversion notes. Never
-   invent a resume id.
+3. **Report the printed `resume:` line verbatim** (e.g.
+   `cd <cwd> && claude --resume <id>`, in TOON it is the `resume:` field), plus
+   any `•` conversion notes. Never invent a resume id.
 
 ## Notes
 

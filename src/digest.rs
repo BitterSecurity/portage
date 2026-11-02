@@ -97,6 +97,13 @@ fn build_brief(session: &Session, source: &str, target: &str) -> String {
     s.push_str(&goal);
     s.push_str("\n\n");
 
+    if let Some(cwd) = &session.cwd {
+        if let Some(ws) = crate::workspace::section(cwd) {
+            s.push_str(&ws);
+            s.push('\n');
+        }
+    }
+
     s.push_str(&format!("## Files touched ({})\n", files.len()));
     if files.is_empty() {
         s.push_str("(none detected)\n");
