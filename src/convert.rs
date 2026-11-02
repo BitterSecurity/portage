@@ -49,8 +49,14 @@ pub fn run(
         bail!("{} cannot be used as a target (resume not supported here)", target.name());
     }
 
-    let raw = source.read(locator)?;
+    let mut raw = source.read(locator)?;
     let mut report = ConversionReport::default();
+
+    // The effective cwd (override wins) drives both the target registration
+    // and the workspace context carried into the briefing/preamble.
+    if let Some(cwd) = &opts.write.cwd_override {
+        raw.cwd = Some(cwd.clone());
+    }
 
     let session = match opts.mode {
         Mode::Handoff => {
@@ -94,6 +100,12 @@ fn preamble(session: &Session, source: &str) -> Message {
     if !session.pending.open_tool_calls.is_empty() {
         t.push_str("\nTool calls that were still open: ");
         t.push_str(&session.pending.open_tool_calls.join(", "));
+    }
+    if let Some(cwd) = &session.cwd {
+        if let Some(ws) = crate::workspace::section(cwd) {
+            t.push('\n');
+            t.push_str(&ws);
+        }
     }
     Message { role: Role::User, blocks: vec![Block::Text { text: t }], timestamp: None }
 }

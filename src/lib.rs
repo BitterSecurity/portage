@@ -8,3 +8,5 @@ pub mod find;
 pub mod harness;
 pub mod ir;
 pub mod mcp;
+pub mod output;
+pub mod workspace;

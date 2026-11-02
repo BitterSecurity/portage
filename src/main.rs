@@ -1,9 +1,11 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use portage::adapters;
-use portage::harness::{mtime_str, WriteOpts};
-use portage::ir::{Block, Session};
+use portage::harness::WriteOpts;
+use portage::ir::Block;
+use portage::output::{parse_format, render, Format};
 use portage::{convert, find};
+use serde_json::json;
 
 #[derive(Parser)]
 #[command(
@@ -16,12 +18,19 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// One output contract for every command: TOON by default (token-compact,
+/// uniform structure an agent parses once), `--format json|text` to switch,
+/// `PORTAGE_FORMAT` to pin a default for the environment.
+
 #[derive(Subcommand)]
 enum Cmd {
     /// List sessions in a harness store (or across all readable harnesses).
     List {
         #[arg(long)]
         from: Option<String>,
+        /// Output format: toon (default), json, text.
+        #[arg(long, env = "PORTAGE_FORMAT", default_value = "toon")]
+        format: String,
     },
     /// Find sessions in a harness by description keywords and/or recency.
     Find {
@@ -34,12 +43,18 @@ enum Cmd {
         latest: bool,
         #[arg(long, default_value_t = 8)]
         limit: usize,
+        /// Output format: toon (default), json, text.
+        #[arg(long, env = "PORTAGE_FORMAT", default_value = "toon")]
+        format: String,
     },
     /// Show the parsed structure of one session.
     Inspect {
         session: String,
         #[arg(long)]
         from: String,
+        /// Output format: toon (default), json, text.
+        #[arg(long, env = "PORTAGE_FORMAT", default_value = "toon")]
+        format: String,
     },
     /// Convert a session from one harness into another and register it.
     ///
@@ -73,6 +88,9 @@ enum Cmd {
         /// Write even if the target store schema is unrecognized.
         #[arg(long)]
         force: bool,
+        /// Output format: toon (default), json, text.
+        #[arg(long, env = "PORTAGE_FORMAT", default_value = "toon")]
+        format: String,
     },
     /// Run the MCP server over stdio (exposes list/inspect/convert as tools).
     Mcp,
@@ -82,10 +100,12 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::List { from } => list(from),
-        Cmd::Find { query, from, latest, limit } => find_cmd(&from, &query.join(" "), latest, limit),
-        Cmd::Inspect { session, from } => inspect(&from, &session),
-        Cmd::Convert { session, from, to, mode, tail, match_query, latest, cwd, no_handshake, force } => {
+        Cmd::List { from, format } => list(from, parse_format(&format)?),
+        Cmd::Find { query, from, latest, limit, format } => {
+            find_cmd(&from, &query.join(" "), latest, limit, parse_format(&format)?)
+        }
+        Cmd::Inspect { session, from, format } => inspect(&from, &session, parse_format(&format)?),
+        Cmd::Convert { session, from, to, mode, tail, match_query, latest, cwd, no_handshake, force, format } => {
             let src = adapters::by_name(&from)?;
             let dst = adapters::by_name(&to)?;
             let locator = resolve_locator(src.as_ref(), session, match_query, latest)?;
@@ -104,11 +124,15 @@ fn main() -> Result<()> {
             for n in &report.notes {
                 eprintln!("• {n}");
             }
-            println!("wrote {} artifact(s):", outcome.artifacts.len());
-            for a in &outcome.artifacts {
-                println!("  {}", a.display());
-            }
-            println!("resume with:\n  {}", outcome.resume_hint);
+            let payload = json!({
+                "source": locator,
+                "target": to,
+                "target_session_id": outcome.target_session_id,
+                "resume": outcome.resume_hint,
+                "artifacts": outcome.artifacts.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                "notes": report.notes,
+            });
+            print!("{}", render(&payload, parse_format(&format)?));
             Ok(())
         }
         Cmd::Mcp => portage::mcp::serve_stdio(),
@@ -126,63 +150,99 @@ fn yn(b: bool) -> &'static str {
     if b { "yes" } else { "no" }
 }
 
-fn list(from: Option<String>) -> Result<()> {
+/// Payload for `list`: one table across harnesses (each row keeps its harness).
+fn list_rows(name: &str, refs: &[portage::harness::SessionRef]) -> Vec<serde_json::Value> {
+    refs.iter()
+        .map(|r| {
+            json!({
+                "harness": name,
+                "title": r.title.clone().unwrap_or_default(),
+                "cwd": r.cwd.clone().unwrap_or_default(),
+                "modified": r.modified.clone().unwrap_or_default(),
+                "locator": r.locator,
+            })
+        })
+        .collect()
+}
+
+fn list(from: Option<String>, fmt: Format) -> Result<()> {
     let names: Vec<&str> = match &from {
         Some(f) => vec![f.as_str()],
         None => adapters::SUPPORTED.iter().filter(|(_, r, _)| *r).map(|(n, _, _)| *n).collect(),
     };
+    let mut all: Vec<serde_json::Value> = Vec::new();
     for name in names {
         let a = adapters::by_name(name)?;
         let mut refs = a.list()?;
         // newest first by modified (fall back to locator mtime)
         refs.sort_by(|x, y| ref_mtime(y).cmp(&ref_mtime(x)));
-        println!("[{}] {} session(s)", a.name(), refs.len());
-        for r in &refs {
-            print_ref(r);
-        }
+        all.extend(list_rows(a.name(), &refs));
     }
+    // Newest first across the merged table.
+    all.sort_by(|x, y| {
+        let k = |v: &serde_json::Value| v["modified"].as_str().unwrap_or("").to_string();
+        k(y).cmp(&k(x))
+    });
+    print!("{}", render(&serde_json::json!({ "sessions": all }), fmt));
     Ok(())
 }
 
-fn find_cmd(from: &str, query: &str, latest: bool, limit: usize) -> Result<()> {
+fn find_payload(from: &str, query: &str, latest: bool, hits: &[find::Hit]) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = hits
+        .iter()
+        .map(|h| {
+            json!({
+                "terms": h.terms_matched,
+                "modified": h.reference.modified.clone().unwrap_or_default(),
+                "title": h.reference.title.clone().unwrap_or_default(),
+                "cwd": h.reference.cwd.clone().unwrap_or_default(),
+                "summary": h.summary.clone().unwrap_or_default(),
+                "locator": h.reference.locator,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "from": from,
+        "query": query,
+        "latest": latest,
+        "hits": rows,
+    })
+}
+
+fn find_cmd(from: &str, query: &str, latest: bool, limit: usize, fmt: Format) -> Result<()> {
     let a = adapters::by_name(from)?;
-    if latest {
+    let (payload, fallback_note) = if latest {
         match find::latest(a.as_ref())? {
-            Some(r) => {
-                println!("[{}] most recent:", a.name());
-                print_ref(&r);
-            }
-            None => println!("[{}] no sessions found", a.name()),
+            Some(r) => (
+                find_payload(from, "", true, &[find::Hit {
+                    score: 0,
+                    terms_matched: 0,
+                    summary: None,
+                    reference: r,
+                }]),
+                None,
+            ),
+            None => (serde_json::json!({ "from": from, "latest": true, "hits": [] }), None),
         }
-        return Ok(());
-    }
-    if query.trim().is_empty() {
-        bail!("give description keywords, or pass --latest");
-    }
-    let hits = find::search(a.as_ref(), query, limit)?;
-    if hits.is_empty() {
-        println!("[{}] no keyword match for \"{}\" — showing recent sessions to browse:", a.name(), query);
-        for h in &find::browse(a.as_ref(), limit)? {
-            print_hit(h);
+    } else {
+        if query.trim().is_empty() {
+            bail!("give description keywords, or pass --latest");
         }
-        return Ok(());
+        let hits = find::search(a.as_ref(), query, limit)?;
+        if hits.is_empty() {
+            (
+                find_payload(from, query, false, &find::browse(a.as_ref(), limit)?),
+                Some(format!("no keyword match for \"{query}\" — recent sessions follow")),
+            )
+        } else {
+            (find_payload(from, query, false, &hits), None)
+        }
+    };
+    if let Some(note) = fallback_note {
+        eprintln!("• {note}");
     }
-    println!("[{}] {} match(es) for \"{}\":", a.name(), hits.len(), query);
-    for h in &hits {
-        print_hit(h);
-    }
+    print!("{}", render(&payload, fmt));
     Ok(())
-}
-
-fn print_hit(h: &find::Hit) {
-    let when = h.reference.modified.clone()
-        .or_else(|| mtime_str(std::path::Path::new(&h.reference.locator)));
-    let tag = if h.terms_matched > 0 { format!("[{} terms] ", h.terms_matched) } else { String::new() };
-    println!("  {}{}", tag, when.as_deref().unwrap_or("-"));
-    if let Some(sum) = &h.summary {
-        println!("    {sum}");
-    }
-    println!("    {}", h.reference.locator);
 }
 
 /// Resolve the source session from an explicit path, `--match`, or `--latest`.
@@ -220,25 +280,9 @@ fn ref_mtime(r: &portage::harness::SessionRef) -> Option<std::time::SystemTime> 
     std::fs::metadata(&r.locator).ok().and_then(|m| m.modified().ok())
 }
 
-fn print_ref(r: &portage::harness::SessionRef) {
-    let when = r.modified.clone().or_else(|| mtime_str(std::path::Path::new(&r.locator)));
-    let label = r.title.clone().or_else(|| r.cwd.clone()).unwrap_or_default();
-    println!("  {:<20} {}", when.as_deref().unwrap_or("-"), label);
-    println!("    {}", r.locator);
-}
-
-fn inspect(from: &str, locator: &str) -> Result<()> {
+fn inspect(from: &str, locator: &str, fmt: Format) -> Result<()> {
     let a = adapters::by_name(from)?;
     let s = a.read(locator)?;
-    print_summary(&s);
-    Ok(())
-}
-
-fn print_summary(s: &Session) {
-    println!("source harness : {}", s.source_harness);
-    println!("cwd            : {}", s.cwd.as_deref().unwrap_or("-"));
-    println!("created        : {}", s.created.as_deref().unwrap_or("-"));
-    println!("messages       : {}", s.messages.len());
     let (mut text, mut reasoning, mut calls, mut results) = (0, 0, 0, 0);
     for m in &s.messages {
         for b in &m.blocks {
@@ -250,5 +294,14 @@ fn print_summary(s: &Session) {
             }
         }
     }
-    println!("blocks         : text={text} reasoning={reasoning} tool_calls={calls} tool_results={results}");
+    let payload = serde_json::json!({
+        "source": s.source_harness,
+        "locator": locator,
+        "cwd": s.cwd.clone().unwrap_or_default(),
+        "created": s.created.clone().unwrap_or_default(),
+        "messages": s.messages.len(),
+        "blocks": { "text": text, "reasoning": reasoning, "tool_calls": calls, "tool_results": results },
+    });
+    print!("{}", render(&payload, fmt));
+    Ok(())
 }

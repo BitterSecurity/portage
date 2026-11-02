@@ -285,3 +285,147 @@ fn codex_index_registration_inserts_row() {
     let n: i64 = conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0)).unwrap();
     assert_eq!(n, 1, "write should register one row in a recognized index");
 }
+
+/// Real opencode-compatible store schema (the columns the writer targets).
+const OPENCODE_DDL: &str = "
+CREATE TABLE project(id TEXT PRIMARY KEY, worktree TEXT, time_created INTEGER, time_updated INTEGER, sandboxes TEXT);
+CREATE TABLE session(id TEXT PRIMARY KEY, project_id TEXT, slug TEXT, directory TEXT, title TEXT,
+  version TEXT, path TEXT, agent TEXT, model TEXT, cost REAL, tokens_input INTEGER, tokens_output INTEGER,
+  tokens_reasoning INTEGER, tokens_cache_read INTEGER, tokens_cache_write INTEGER,
+  summary_additions INTEGER, summary_deletions INTEGER, summary_files INTEGER,
+  time_created INTEGER, time_updated INTEGER);
+CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+";
+
+fn seed_opencode_store(root: &std::path::Path, seed_model: bool) {
+    let db = root.join(".local/share/opencode/opencode.db");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(OPENCODE_DDL).unwrap();
+    conn.execute(
+        "INSERT INTO project(id, worktree, time_created, time_updated, sandboxes) VALUES('global','/',1,1,'{}')",
+        [],
+    )
+    .unwrap();
+    if seed_model {
+        conn.execute(
+            "INSERT INTO session(id, project_id, slug, directory, title, version, model, time_created, time_updated)
+             VALUES('s0','global','abc','/home/u/proj','seed','1.0.0','{\"id\":\"gpt-test\",\"providerID\":\"openai\"}',1,1)",
+            [],
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn opencode_roundtrip_preserves_blocks_and_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    seed_opencode_store(&root, true);
+
+    let oc = adapters::by_name_with_root("opencode", Some(root.clone())).unwrap();
+    let opts = WriteOpts { handshake: false, cwd_override: Some("/home/u/proj".into()), force: false };
+    let out = oc.write(&sample(), &opts).unwrap();
+    assert!(out.resume_hint.contains("cd /home/u/proj && opencode --session"));
+
+    let back = oc.read(&out.target_session_id).unwrap();
+    assert_eq!(block_kinds(&back), block_kinds(&sample()));
+    assert_eq!(back.cwd.as_deref(), Some("/home/u/proj"));
+    // Conversation order survives: user prompt -> assistant reply. The bare
+    // tool-result turn merges into its call's tool part (the store's native
+    // shape), so 3 source messages come back as 2.
+    assert_eq!(back.messages.len(), 2);
+    assert_eq!(back.messages[0].role, Role::User);
+    assert_eq!(Session::text_of(&back.messages[0]), "hello");
+    assert_eq!(back.messages[1].role, Role::Assistant);
+
+    // Store registration: session row carries the discovered model + project,
+    // and the tool part merged its result.
+    let conn = rusqlite::Connection::open(root.join(".local/share/opencode/opencode.db")).unwrap();
+    let (model, project): (String, String) = conn
+        .query_row(
+            &format!("SELECT model, project_id FROM session WHERE id = '{}'", out.target_session_id),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(model, r#"{"id":"gpt-test","providerID":"openai"}"#);
+    assert_eq!(project, "global");
+    let tool_parts: Vec<String> = conn
+        .prepare("SELECT data FROM part WHERE data LIKE '%\"type\":\"tool\"%'")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(tool_parts.len(), 1, "call+result merge into one tool part");
+    let v: serde_json::Value = serde_json::from_str(&tool_parts[0]).unwrap();
+    assert_eq!(v["state"]["status"], "completed");
+    assert_eq!(v["state"]["output"], "file body");
+}
+
+#[test]
+fn opencode_write_fails_loudly_without_a_usable_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    seed_opencode_store(&root, false); // no sessions -> nothing to discover
+
+    let oc = adapters::by_name_with_root("opencode", Some(root.clone())).unwrap();
+    let err = oc
+        .write(&sample(), &WriteOpts::default())
+        .expect_err("must refuse to write a session it cannot make resumable");
+    assert!(err.to_string().contains("PORTAGE_OPENCODE_MODEL"), "got: {err}");
+}
+
+#[test]
+fn opencode_write_creates_project_on_fresh_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    seed_opencode_store(&root, true);
+    // Remove the seeded project: writer must recreate linkage on demand.
+    let db = root.join(".local/share/opencode/opencode.db");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM project", []).unwrap();
+
+    let oc = adapters::by_name_with_root("opencode", Some(root.clone())).unwrap();
+    let out = oc.write(&sample(), &WriteOpts::default()).unwrap();
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let project: String = conn
+        .query_row(
+            &format!("SELECT project_id FROM session WHERE id = '{}'", out.target_session_id),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(project, "global");
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM project", [], |r| r.get(0)).unwrap();
+    assert_eq!(n, 1, "root project created on demand");
+}
+
+#[test]
+fn workspace_section_reflects_a_git_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-C", dir.path().to_str().unwrap()])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@t"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(dir.path().join("a.txt"), "hi").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "initial commit"]);
+    std::fs::write(dir.path().join("a.txt"), "changed").unwrap(); // dirty
+
+    let cwd = dir.path().to_str().unwrap();
+    let sec = portage::workspace::section(cwd).expect("git repo should yield a section");
+    assert!(sec.contains("Workspace snapshot"));
+    assert!(sec.contains("1 uncommitted file(s)"));
+    assert!(sec.contains("initial commit"));
+    assert!(sec.contains("branch:"));
+}

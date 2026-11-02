@@ -122,45 +122,77 @@ fn call_inner(params: Option<&Value>) -> Result<String> {
         "list" => {
             let from = get("from").ok_or_else(|| anyhow::anyhow!("'from' required"))?;
             let a = adapters::by_name(&from)?;
-            let refs = a.list()?;
-            Ok(refs.into_iter().map(|r| r.locator).collect::<Vec<_>>().join("\n"))
+            let mut refs = a.list()?;
+            refs.sort_by(|x, y| {
+                let k = |r: &crate::harness::SessionRef| r.modified.clone().unwrap_or_default();
+                k(y).cmp(&k(x))
+            });
+            let rows: Vec<Value> = refs
+                .iter()
+                .map(|r| {
+                    json!({
+                        "harness": a.name(),
+                        "title": r.title.clone().unwrap_or_default(),
+                        "cwd": r.cwd.clone().unwrap_or_default(),
+                        "modified": r.modified.clone().unwrap_or_default(),
+                        "locator": r.locator,
+                    })
+                })
+                .collect();
+            Ok(crate::output::render(&json!({ "sessions": rows }), crate::output::Format::Toon))
         }
         "find" => {
             let from = get("from").ok_or_else(|| anyhow::anyhow!("'from' required"))?;
             let a = adapters::by_name(&from)?;
-            if args.get("latest").and_then(Value::as_bool) == Some(true) {
-                return Ok(match find::latest(a.as_ref())? {
-                    Some(r) => format!("{}\t{}", r.locator, label(&r)),
-                    None => "(no sessions)".into(),
-                });
-            }
-            let q = get("query").ok_or_else(|| anyhow::anyhow!("'query' or 'latest' required"))?;
-            let hits = find::search(a.as_ref(), &q, 8)?;
-            let (header, hits) = if hits.is_empty() {
-                (format!("no keyword match for \"{q}\" — recent sessions to pick from:\n"),
-                 find::browse(a.as_ref(), 8)?)
+            let (payload, note) = if args.get("latest").and_then(Value::as_bool) == Some(true) {
+                match find::latest(a.as_ref())? {
+                    Some(r) => (find_payload(a.name(), "", true, &[find::Hit {
+                        score: 0, terms_matched: 0, summary: None, reference: r,
+                    }]), None),
+                    None => (json!({ "from": a.name(), "latest": true, "hits": [] }),
+                             Some("no sessions found".to_string())),
+                }
             } else {
-                (String::new(), hits)
+                let q = get("query").ok_or_else(|| anyhow::anyhow!("'query' or 'latest' required"))?;
+                let hits = find::search(a.as_ref(), &q, 8)?;
+                if hits.is_empty() {
+                    (find_payload(a.name(), &q, false, &find::browse(a.as_ref(), 8)?),
+                     Some(format!("no keyword match for \"{q}\" — recent sessions follow")))
+                } else {
+                    (find_payload(a.name(), &q, false, &hits), None)
+                }
             };
-            Ok(header
-                + &hits
-                    .iter()
-                    .map(|h| {
-                        format!(
-                            "{}\n    {}\n    {}",
-                            h.summary.clone().unwrap_or_else(|| label(&h.reference)),
-                            h.reference.locator,
-                            h.reference.cwd.clone().unwrap_or_default()
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"))
+            if let Some(n) = note {
+                return Ok(format!("# {n}\n{}", crate::output::render(&payload, crate::output::Format::Toon)));
+            }
+            Ok(crate::output::render(&payload, crate::output::Format::Toon))
         }
         "inspect" => {
             let from = get("from").ok_or_else(|| anyhow::anyhow!("'from' required"))?;
             let session = get("session").ok_or_else(|| anyhow::anyhow!("'session' required"))?;
             let s = adapters::by_name(&from)?.read(&session)?;
-            Ok(format!("{} messages from {}", s.messages.len(), s.source_harness))
+            let (mut text, mut reasoning, mut calls, mut results) = (0, 0, 0, 0);
+            for m in &s.messages {
+                for b in &m.blocks {
+                    match b {
+                        crate::ir::Block::Text { .. } => text += 1,
+                        crate::ir::Block::Reasoning { .. } => reasoning += 1,
+                        crate::ir::Block::ToolCall { .. } => calls += 1,
+                        crate::ir::Block::ToolResult { .. } => results += 1,
+                    }
+                }
+            }
+            Ok(crate::output::render(
+                &json!({
+                    "source": s.source_harness,
+                    "locator": session,
+                    "cwd": s.cwd.clone().unwrap_or_default(),
+                    "created": s.created.clone().unwrap_or_default(),
+                    "messages": s.messages.len(),
+                    "blocks": { "text": text, "reasoning": reasoning, "tool_calls": calls, "tool_results": results },
+                }),
+                crate::output::Format::Toon,
+            ))
         }
         "convert" => {
             let from = get("from").ok_or_else(|| anyhow::anyhow!("'from' required"))?;
@@ -192,12 +224,36 @@ fn call_inner(params: Option<&Value>) -> Result<String> {
                 write: WriteOpts { handshake: true, cwd_override: get("cwd"), force: false },
             };
             let (outcome, report) = convert::run(src.as_ref(), dst.as_ref(), &locator, &opts)?;
-            Ok(format!("source: {locator}\n{}\nresume: {}", report.notes.join("; "), outcome.resume_hint))
+            Ok(crate::output::render(
+                &json!({
+                    "source": locator,
+                    "target": to,
+                    "target_session_id": outcome.target_session_id,
+                    "resume": outcome.resume_hint,
+                    "artifacts": outcome.artifacts.iter().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                    "notes": report.notes,
+                }),
+                crate::output::Format::Toon,
+            ))
         }
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }
 
-fn label(r: &crate::harness::SessionRef) -> String {
-    r.title.clone().or_else(|| r.cwd.clone()).unwrap_or_default()
+/// Shared with the CLI: the find result table (harness-scoped fields).
+fn find_payload(from: &str, query: &str, latest: bool, hits: &[find::Hit]) -> Value {
+    let rows: Vec<Value> = hits
+        .iter()
+        .map(|h| {
+            json!({
+                "terms": h.terms_matched,
+                "modified": h.reference.modified.clone().unwrap_or_default(),
+                "title": h.reference.title.clone().unwrap_or_default(),
+                "cwd": h.reference.cwd.clone().unwrap_or_default(),
+                "summary": h.summary.clone().unwrap_or_default(),
+                "locator": h.reference.locator,
+            })
+        })
+        .collect();
+    json!({ "from": from, "query": query, "latest": latest, "hits": rows })
 }

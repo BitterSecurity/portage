@@ -31,7 +31,7 @@ pub const SUPPORTED: &[(&str, bool, bool)] = &[
     ("copilot", true, false),
     ("qwen", true, true),
     ("kimi", true, true),
-    ("opencode", true, false),
+    ("opencode", true, true),
 ];
 
 pub fn by_name(name: &str) -> Result<Box<dyn Adapter>> {
